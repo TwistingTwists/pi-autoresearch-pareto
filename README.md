@@ -23,7 +23,7 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). W
 
 | Tool | Description |
 |------|-------------|
-| `init_experiment` | One-time session config — name, metric, unit, direction |
+| `init_experiment` | One-time session config — single metric, threshold-first Pareto, or full frontier exploration |
 | `run_experiment` | Runs any command, times wall-clock duration, captures output |
 | `log_experiment` | Records result, auto-commits, updates widget and dashboard |
 
@@ -44,6 +44,12 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). W
 ---
 
 ## Install
+
+```bash
+pi install https://github.com/TwistingTwists/pi-autoresearch-pareto
+```
+
+Or from the original:
 
 ```bash
 pi install https://github.com/davebcn87/pi-autoresearch
@@ -71,7 +77,13 @@ Then `/reload` in pi.
 /skill:autoresearch-create
 ```
 
-The agent asks about your goal, command, metric, and files in scope — or infers them from context. It then creates a branch, writes `autoresearch.md` and `autoresearch.sh`, runs the baseline, and starts looping immediately.
+The agent asks about your goal, command, files in scope, and experiment mode — or infers them from context. It supports:
+
+- `single_objective` — optimize one metric
+- `threshold_then_optimize` — satisfy a threshold on one metric, then improve another
+- `frontier_exploration` — map the non-dominated frontier across 2-3 competing metrics
+
+It then creates a branch, writes `autoresearch.md` and `autoresearch.sh`, runs the baseline, and starts looping immediately.
 
 ### 2. The loop
 
@@ -87,7 +99,7 @@ Every result is appended to `autoresearch.jsonl` in your project — one line pe
 ### 3. Monitor progress
 
 - **Widget** — always visible above the editor
-- **`/autoresearch`** — full dashboard with results table and best run
+- **`/autoresearch`** — full dashboard with results table, best run, or Pareto frontier summary depending on mode
 - **`Escape`** — interrupt anytime and ask for a summary
 
 ---
