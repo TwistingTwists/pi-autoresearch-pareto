@@ -15,7 +15,22 @@ Autonomous experiment loop: try ideas, keep what works, discard what doesn't, ne
   - `frontier_exploration` — explore the non-dominated Pareto frontier across 2-3 primary metrics
   Call again to re-initialize with a new baseline when the optimization target changes.
 - **`run_experiment`** — runs command, times it, captures output.
-- **`log_experiment`** — records result. For successful runs, provide the metrics and let the tool compute `keep` vs `discard` from the active mode. `keep` auto-commits. `discard`/`crash` → `git checkout -- .` to revert. Always include secondary `metrics` dict. Dashboard: ctrl+x.
+- **`log_experiment`** — records result with required parameters. `keep` auto-commits. `discard`/`crash` → `git checkout -- .` to revert.
+  - **Required**: `commit` (7-char git hash), `status` ("keep"/"discard"/"crash"), `description` (what this run tried)
+  - **Optional**: `primary_metrics` (dict of optimization metrics), `metrics` (dict of secondary metrics to track)
+  - Example:
+    ```json
+    {
+      "commit": "abc1234",
+      "status": "keep",
+      "description": "baseline: 4 fixture violations, 180 cal violations",
+      "primary_metrics": {
+        "fixture_actual": 4,
+        "cal_violations": 180
+      }
+    }
+    ```
+  - Dashboard: ctrl+x
 
 ## Setup
 

@@ -215,6 +215,32 @@ function initExperimentExampleText(
   )}`;
 }
 
+function logExperimentExampleText(state: ExperimentState): string {
+  const example: Record<string, unknown> = {
+    commit: "abc1234",
+    status: "keep",
+    description: "description of what this experiment tried",
+  };
+  
+  // Build primary_metrics example
+  const primaryMetricsExample: Record<string, number> = {};
+  for (const m of state.primaryMetrics) {
+    primaryMetricsExample[m.name] = 42; // placeholder value
+  }
+  example.primary_metrics = primaryMetricsExample;
+  
+  // Add secondary metrics example if any exist
+  if (state.secondaryMetrics.length > 0) {
+    const secondaryExample: Record<string, number> = {};
+    for (const m of state.secondaryMetrics) {
+      secondaryExample[m.name] = 100; // placeholder value
+    }
+    example.metrics = secondaryExample;
+  }
+  
+  return `\n\nSample JSON:\n${JSON.stringify(example, null, 2)}`;
+}
+
 const LogParams = Type.Object({
   commit: Type.String({ description: "Git commit hash (short, 7 chars)" }),
   metric: Type.Optional(Type.Number({
@@ -1610,7 +1636,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
                 .map((m) => m.name)
                 .join(
                   ", "
-                )}\n\nYou must provide all primary metrics defined in init_experiment.`,
+                )}\n\nYou must provide all primary metrics defined in init_experiment.` + logExperimentExampleText(state),
             },
           ],
           details: {},
@@ -1637,7 +1663,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
                   [...providedNames].join(", ") || "(none)"
                 }\n\nFix: include ${missing
                   .map((m) => `"${m}": <value>`)
-                  .join(", ")} in the metrics parameter.`,
+                  .join(", ")} in the metrics parameter.` + logExperimentExampleText(state),
               },
             ],
             details: {},
@@ -1657,7 +1683,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
                   ", "
                 )}\n\nExisting metrics: ${[...knownNames].join(
                   ", "
-                )}\n\nIf this metric has proven very valuable to watch, call log_experiment again with force: true to add it. Otherwise, remove it from the metrics parameter.`,
+                )}\n\nIf this metric has proven very valuable to watch, call log_experiment again with force: true to add it. Otherwise, remove it from the metrics parameter.` + logExperimentExampleText(state),
               },
             ],
             details: {},
