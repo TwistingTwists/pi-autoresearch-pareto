@@ -46,6 +46,12 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). W
 ## Install
 
 ```bash
+pi install https://github.com/TwistingTwists/pi-autoresearch-pareto
+```
+
+Or from the original:
+
+```bash
 pi install https://github.com/davebcn87/pi-autoresearch
 ```
 
