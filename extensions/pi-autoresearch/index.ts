@@ -160,6 +160,61 @@ const InitParams = Type.Object({
   })),
 });
 
+function samplePrimaryMetrics(
+  names: string[],
+  unit = "violations",
+  direction: "lower" | "higher" = "lower"
+) {
+  return names.map((name) => ({ name, unit, direction }));
+}
+
+function initExperimentExample(
+  mode: "single_objective" | "threshold_then_optimize" | "frontier_exploration",
+  name: string,
+  names?: string[]
+) {
+  if (mode === "single_objective") {
+    return {
+      name,
+      mode,
+      primary_metrics: samplePrimaryMetrics([names?.[0] ?? "metric"]),
+    };
+  }
+
+  if (mode === "threshold_then_optimize") {
+    const metricNames = names ?? ["fixture_violations", "cal_violations"];
+    return {
+      name,
+      mode,
+      primary_metrics: samplePrimaryMetrics(metricNames),
+      threshold_metric: metricNames[0],
+      threshold_operator: ">=",
+      threshold_value: 4,
+      optimize_metric: metricNames[1],
+    };
+  }
+
+  return {
+    name,
+    mode,
+    primary_metrics: samplePrimaryMetrics(
+      names ?? ["fixture_violations", "cal_violations", "render_time_ms"]
+    ),
+  };
+}
+
+function initExperimentExampleText(
+  mode: "single_objective" | "threshold_then_optimize" | "frontier_exploration",
+  name: string,
+  names?: string[]
+) {
+  return `\n\nSample JSON:\n${JSON.stringify(
+    initExperimentExample(mode, name, names),
+    null,
+    2
+  )}`;
+}
+
 const LogParams = Type.Object({
   commit: Type.String({ description: "Git commit hash (short, 7 chars)" }),
   metric: Type.Optional(Type.Number({
@@ -1173,7 +1228,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: "❌ frontier_exploration requires 2-3 primary_metrics.",
+              text:
+                "❌ frontier_exploration requires 2-3 primary_metrics." +
+                initExperimentExampleText(
+                  "frontier_exploration",
+                  params.name,
+                  state.primaryMetrics.map((m) => m.name)
+                ),
             }],
             details: {},
           };
@@ -1185,7 +1246,14 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: "❌ threshold_then_optimize requires exactly 2 primary_metrics.",
+              text:
+                "❌ threshold_then_optimize requires exactly 2 primary_metrics." +
+                initExperimentExampleText(
+                  "threshold_then_optimize",
+                  params.name,
+                  state.primaryMetrics.map((m) => m.name)
+                ) +
+                "\n\nNote: primary_metrics must be an array of objects, not a JSON string.",
             }],
             details: {},
           };
@@ -1195,7 +1263,14 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: "❌ threshold_then_optimize requires threshold_metric, threshold_operator, threshold_value, and optimize_metric.",
+              text:
+                "❌ threshold_then_optimize requires threshold_metric, threshold_operator, threshold_value, and optimize_metric." +
+                initExperimentExampleText(
+                  "threshold_then_optimize",
+                  params.name,
+                  state.primaryMetrics.map((m) => m.name)
+                ) +
+                "\n\nAllowed threshold_operator values: >=, >, <=, <.",
             }],
             details: {},
           };
@@ -1204,7 +1279,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: `❌ threshold_metric "${params.threshold_metric}" must be one of the primary_metrics.`,
+              text:
+                `❌ threshold_metric "${params.threshold_metric}" must be one of the primary_metrics.` +
+                initExperimentExampleText(
+                  "threshold_then_optimize",
+                  params.name,
+                  state.primaryMetrics.map((m) => m.name)
+                ),
             }],
             details: {},
           };
@@ -1213,7 +1294,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: `❌ optimize_metric "${params.optimize_metric}" must be one of the primary_metrics.`,
+              text:
+                `❌ optimize_metric "${params.optimize_metric}" must be one of the primary_metrics.` +
+                initExperimentExampleText(
+                  "threshold_then_optimize",
+                  params.name,
+                  state.primaryMetrics.map((m) => m.name)
+                ),
             }],
             details: {},
           };
@@ -1222,7 +1309,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: "❌ threshold_metric and optimize_metric must be different.",
+              text:
+                "❌ threshold_metric and optimize_metric must be different." +
+                initExperimentExampleText(
+                  "threshold_then_optimize",
+                  params.name,
+                  state.primaryMetrics.map((m) => m.name)
+                ),
             }],
             details: {},
           };
@@ -1239,7 +1332,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: "❌ single_objective mode requires exactly 1 primary metric.",
+            text:
+              "❌ single_objective mode requires exactly 1 primary metric." +
+              initExperimentExampleText(
+                "single_objective",
+                params.name,
+                state.primaryMetrics.map((m) => m.name)
+              ),
           }],
           details: {},
         };
