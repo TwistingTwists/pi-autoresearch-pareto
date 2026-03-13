@@ -9,17 +9,25 @@ Autonomous experiment loop: try ideas, keep what works, discard what doesn't, ne
 
 ## Tools
 
-- **`init_experiment`** — configure session (name, metric, unit, direction). For multiple goals, use `primary_metrics` array. Call again to re-initialize with a new baseline when the optimization target changes.
+- **`init_experiment`** — configure session. Supports three modes:
+  - `single_objective` — one metric
+  - `threshold_then_optimize` — metric A must pass a threshold, then optimize metric B
+  - `frontier_exploration` — explore the non-dominated Pareto frontier across 2-3 primary metrics
+  Call again to re-initialize with a new baseline when the optimization target changes.
 - **`run_experiment`** — runs command, times it, captures output.
-- **`log_experiment`** — records result. For multiple goals, use `primary_metrics` dict. `keep` auto-commits. `discard`/`crash` → `git checkout -- .` to revert. Always include secondary `metrics` dict. Dashboard: ctrl+x.
+- **`log_experiment`** — records result. For successful runs, provide the metrics and let the tool compute `keep` vs `discard` from the active mode. `keep` auto-commits. `discard`/`crash` → `git checkout -- .` to revert. Always include secondary `metrics` dict. Dashboard: ctrl+x.
 
 ## Setup
 
-1. Ask (or infer): **Goal**, **Command**, **Metric** (+ direction), **Files in scope**, **Constraints**.
-2. `git checkout -b autoresearch/<goal>-<date>`
-3. Read the source files. Understand the workload deeply before writing anything.
-4. Write `autoresearch.md` and `autoresearch.sh` (see below). Commit both.
-5. `init_experiment` → run baseline → `log_experiment` → start looping immediately.
+1. Ask (or infer): **Goal**, **Command**, **Experiment mode**, **Files in scope**, **Constraints**.
+2. If the user wants Pareto behavior, ask which Pareto mode:
+   - `threshold_then_optimize`: "Which metric must cross a threshold first, what is the threshold, and which second metric should improve after that?"
+   - `frontier_exploration`: "Which 2-3 metrics define the tradeoff surface we want to map?"
+   Ask explicitly before designing the experiment unless the user already answered it.
+3. `git checkout -b autoresearch/<goal>-<date>`
+4. Read the source files. Understand the workload deeply before writing anything.
+5. Write `autoresearch.md` and `autoresearch.sh` (see below). Commit both.
+6. `init_experiment` → run baseline → `log_experiment` → start looping immediately.
 
 ### `autoresearch.md`
 
@@ -32,8 +40,10 @@ This is the heart of the session. A fresh agent with no context should be able t
 <Specific description of what we're optimizing and the workload.>
 
 ## Metrics
+- **Mode**: <single_objective | threshold_then_optimize | frontier_exploration>
 - **Primary**: <name> (<unit>, lower/higher is better)
 - **Secondary**: <name>, <name>, ...
+- **Threshold rule**: <only for threshold_then_optimize>
 
 ## How to Run
 `./autoresearch.sh` — outputs `METRIC name=number` lines.
@@ -62,8 +72,9 @@ Bash script (`set -euo pipefail`) that: pre-checks fast (syntax errors in <1s), 
 
 **LOOP FOREVER.** Never ask "should I continue?" — the user expects autonomous work.
 
-- **Primary metric is king.** Improved → `keep`. Worse/equal → `discard`. Secondary metrics rarely affect this.
-- **Pareto Frontier (Multi-objective):** If `primary_metrics` (2-3 recommended) are defined, `keep` if the result is non-dominated by any previous result in the current segment.
+- **Single objective:** improved primary metric → `keep`. Worse/equal → `discard`.
+- **Threshold then optimize:** `keep` only if the threshold is satisfied and the optimize metric improves among feasible kept runs.
+- **Frontier exploration:** `keep` only if the result is non-dominated by previous kept runs in the current segment.
 - **Simpler is better.** Removing code for equal perf = keep. Ugly complexity for tiny gain = probably discard.
 - **Don't thrash.** Repeatedly reverting the same idea? Try something structurally different.
 - **Crashes:** fix if trivial, otherwise log and move on. Don't over-invest.

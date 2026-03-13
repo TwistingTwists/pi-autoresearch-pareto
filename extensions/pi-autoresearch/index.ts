@@ -49,6 +49,20 @@ interface MetricDef {
   direction: "lower" | "higher";
 }
 
+type ExperimentMode =
+  | "single_objective"
+  | "threshold_then_optimize"
+  | "frontier_exploration";
+
+type ThresholdOperator = ">=" | ">" | "<=" | "<";
+
+interface ThresholdConfig {
+  metricName: string;
+  operator: ThresholdOperator;
+  value: number;
+  optimizeMetric: string;
+}
+
 interface ExperimentState {
   results: ExperimentResult[];
   /** Primary metrics definitions */
@@ -56,6 +70,8 @@ interface ExperimentState {
   /** Definitions for secondary metrics (order preserved) */
   secondaryMetrics: MetricDef[];
   name: string | null;
+  mode: ExperimentMode;
+  threshold: ThresholdConfig | null;
   /** Current segment index (incremented on each init_experiment) */
   currentSegment: number;
 
@@ -108,6 +124,11 @@ const InitParams = Type.Object({
     description:
       'Human-readable name for this experiment session (e.g. "Optimizing liquid for fastest execution and parsing")',
   }),
+  mode: Type.Optional(StringEnum([
+    "single_objective",
+    "threshold_then_optimize",
+    "frontier_exploration",
+  ] as const)),
   metric_name: Type.Optional(Type.String({
     description:
       'Display name for the primary metric (e.g. "total_µs", "bundle_kb", "val_bpb"). Shown in dashboard headers.',
@@ -126,6 +147,16 @@ const InitParams = Type.Object({
   ),
   primary_metrics: Type.Optional(Type.Array(MetricDefinition, {
     description: "Definitions for multiple primary metrics (for Pareto frontier optimization).",
+  })),
+  threshold_metric: Type.Optional(Type.String({
+    description: "For threshold_then_optimize: the metric that must satisfy the threshold.",
+  })),
+  threshold_operator: Type.Optional(StringEnum([">=", ">", "<=", "<"] as const)),
+  threshold_value: Type.Optional(Type.Number({
+    description: "For threshold_then_optimize: the threshold value the constraint metric must satisfy.",
+  })),
+  optimize_metric: Type.Optional(Type.String({
+    description: "For threshold_then_optimize: the metric to optimize after the threshold is met.",
   })),
 });
 
@@ -195,6 +226,102 @@ function isBetter(
   direction: "lower" | "higher"
 ): boolean {
   return direction === "lower" ? current < best : current > best;
+}
+
+function compareThreshold(
+  value: number,
+  operator: ThresholdOperator,
+  target: number
+): boolean {
+  switch (operator) {
+    case ">=":
+      return value >= target;
+    case ">":
+      return value > target;
+    case "<=":
+      return value <= target;
+    case "<":
+      return value < target;
+  }
+}
+
+function satisfiesThreshold(
+  metrics: Record<string, number>,
+  threshold: ThresholdConfig | null
+): boolean {
+  if (!threshold) return true;
+  const value = metrics[threshold.metricName];
+  if (value === undefined) return false;
+  return compareThreshold(value, threshold.operator, threshold.value);
+}
+
+function getMetricDef(
+  metrics: MetricDef[],
+  name: string
+): MetricDef | undefined {
+  return metrics.find((m) => m.name === name);
+}
+
+function computeExperimentStatus(
+  mode: ExperimentMode,
+  currentSegmentResults: ExperimentResult[],
+  primaryMetrics: MetricDef[],
+  threshold: ThresholdConfig | null,
+  candidate: ExperimentResult
+): "keep" | "discard" | "crash" {
+  if (candidate.status === "crash") return "crash";
+
+  if (mode === "frontier_exploration") {
+    for (const existing of currentSegmentResults) {
+      if (existing.status !== "keep") continue;
+      if (dominates(existing.primaryMetrics, candidate.primaryMetrics, primaryMetrics)) {
+        return "discard";
+      }
+    }
+    return "keep";
+  }
+
+  if (mode === "threshold_then_optimize") {
+    if (!satisfiesThreshold(candidate.primaryMetrics, threshold)) {
+      return "discard";
+    }
+
+    if (!threshold) return "discard";
+    const optimizeDef = getMetricDef(primaryMetrics, threshold.optimizeMetric);
+    const optimizeValue = candidate.primaryMetrics[threshold.optimizeMetric];
+    if (!optimizeDef || optimizeValue === undefined) return "discard";
+
+    const feasibleKeeps = currentSegmentResults.filter(
+      (r) => r.status === "keep" && satisfiesThreshold(r.primaryMetrics, threshold)
+    );
+    if (feasibleKeeps.length === 0) return "keep";
+
+    let bestFeasible = feasibleKeeps[0].primaryMetrics[threshold.optimizeMetric];
+    for (const r of feasibleKeeps.slice(1)) {
+      const nextValue = r.primaryMetrics[threshold.optimizeMetric];
+      if (nextValue !== undefined && isBetter(nextValue, bestFeasible, optimizeDef.direction)) {
+        bestFeasible = nextValue;
+      }
+    }
+    return isBetter(optimizeValue, bestFeasible, optimizeDef.direction) ? "keep" : "discard";
+  }
+
+  const primary = primaryMetrics[0];
+  const value = candidate.primaryMetrics[primary.name];
+  if (value === undefined) return "discard";
+
+  const priorKeeps = currentSegmentResults.filter((r) => r.status === "keep");
+  if (priorKeeps.length === 0) return "keep";
+
+  let best = priorKeeps[0].primaryMetrics[primary.name];
+  for (const r of priorKeeps.slice(1)) {
+    const nextValue = r.primaryMetrics[primary.name];
+    if (nextValue !== undefined && isBetter(nextValue, best, primary.direction)) {
+      best = nextValue;
+    }
+  }
+
+  return isBetter(value, best, primary.direction) ? "keep" : "discard";
 }
 
 /**
@@ -351,7 +478,7 @@ function renderDashboardLines(
   );
 
   // Progress/Frontier summary
-  if (st.primaryMetrics.length > 1) {
+  if (st.mode === "frontier_exploration") {
     lines.push(
       truncateToWidth(
         `  ${th.fg("muted", "Frontier:")} ${th.fg(
@@ -361,6 +488,31 @@ function renderDashboardLines(
         width
       )
     );
+  } else if (st.mode === "threshold_then_optimize" && st.threshold) {
+    const feasible = cur.filter((r) => satisfiesThreshold(r.primaryMetrics, st.threshold));
+    const optimizeDef = getMetricDef(st.primaryMetrics, st.threshold.optimizeMetric);
+    let bestFeasible: number | null = null;
+    if (optimizeDef) {
+      for (const r of feasible) {
+        if (r.status !== "keep") continue;
+        const value = r.primaryMetrics[optimizeDef.name];
+        if (value === undefined) continue;
+        if (bestFeasible === null || isBetter(value, bestFeasible, optimizeDef.direction)) {
+          bestFeasible = value;
+        }
+      }
+    }
+
+    const constraintText = `${st.threshold.metricName} ${st.threshold.operator} ${formatNum(st.threshold.value, getMetricDef(st.primaryMetrics, st.threshold.metricName)?.unit ?? "")}`;
+    let summary = `  ${th.fg("muted", "Threshold:")} ${th.fg("warning", th.bold(constraintText))}`;
+    summary += th.fg("dim", `  feasible: ${feasible.length}`);
+    if (optimizeDef && bestFeasible !== null) {
+      summary += th.fg(
+        "dim",
+        `  best ${optimizeDef.name}: ${formatNum(bestFeasible, optimizeDef.unit)}`
+      );
+    }
+    lines.push(truncateToWidth(summary, width));
   } else {
     // Single objective progress
     const m = st.primaryMetrics[0];
@@ -575,13 +727,16 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
   let state: ExperimentState = {
     results: [],
+    primaryMetrics: [],
+    secondaryMetrics: [],
+    name: null,
+    mode: "single_objective",
+    threshold: null,
+    currentSegment: 0,
     bestMetric: null,
     bestDirection: "lower",
     metricName: "metric",
     metricUnit: "",
-    secondaryMetrics: [],
-    name: null,
-    currentSegment: 0,
   };
 
   // -----------------------------------------------------------------------
@@ -594,6 +749,8 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       primaryMetrics: [],
       secondaryMetrics: [],
       name: null,
+      mode: "single_objective",
+      threshold: null,
       currentSegment: 0,
       bestMetric: null,
       bestDirection: "lower",
@@ -632,6 +789,11 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
                   direction: state.bestDirection as "lower" | "higher"
                 }];
               }
+              state.mode = entry.mode ??
+                (state.primaryMetrics.length > 1
+                  ? "frontier_exploration"
+                  : "single_objective");
+              state.threshold = entry.threshold ?? null;
 
               // Increment segment (first config = 0, second = 1, etc.)
               if (state.results.length > 0) segment++;
@@ -700,6 +862,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
               direction: state.bestDirection
             }];
           }
+          if (!state.mode) {
+            state.mode = state.primaryMetrics.length > 1
+              ? "frontier_exploration"
+              : "single_objective";
+          }
+          if (state.threshold === undefined) state.threshold = null;
         }
       }
     }
@@ -777,12 +945,26 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           theme.fg("dim", " │ "),
         ];
 
-        if (state.primaryMetrics.length > 1) {
+        if (state.mode === "frontier_exploration") {
           parts.push(
             theme.fg(
               "warning",
               theme.bold(`Pareto Frontier: ${paretoIndices.length} pts`)
             )
+          );
+        } else if (state.mode === "threshold_then_optimize" && state.threshold) {
+          const feasible = cur.filter((r) => satisfiesThreshold(r.primaryMetrics, state.threshold));
+          parts.push(
+            theme.fg(
+              "warning",
+              theme.bold(
+                `${state.threshold.metricName} ${state.threshold.operator} ${formatNum(
+                  state.threshold.value,
+                  getMetricDef(state.primaryMetrics, state.threshold.metricName)?.unit ?? ""
+                )}`
+              )
+            ),
+            theme.fg("dim", ` feasible:${feasible.length}`)
           );
         } else {
           // Single objective: show best
@@ -919,7 +1101,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
     let extra =
       "\n\n## Autoresearch Mode (ACTIVE)" +
-      "\nYou are in autoresearch mode. Optimize the primary metric through an autonomous experiment loop." +
+      "\nYou are in autoresearch mode. Optimize according to the experiment mode through an autonomous experiment loop." +
       "\nUse init_experiment, run_experiment, and log_experiment tools. NEVER STOP until interrupted." +
       `\nExperiment rules: ${mdPath} — read this file at the start of every session and after compaction.` +
       "\nWrite promising but deferred optimizations as bullet points to autoresearch.ideas.md — don't let good ideas get lost." +
@@ -949,6 +1131,8 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       "Call init_experiment exactly once at the start of an autoresearch session, before the first run_experiment.",
       "If autoresearch.jsonl already exists with a config, do NOT call init_experiment again.",
       "If the optimization target changes (different benchmark, metric, or workload), call init_experiment again to insert a new config header and reset the baseline.",
+      "For frontier_exploration, define 2-3 primary_metrics and omit threshold fields.",
+      "For threshold_then_optimize, define exactly 2 primary_metrics plus threshold_metric, threshold_operator, threshold_value, and optimize_metric.",
     ],
     parameters: InitParams,
 
@@ -956,6 +1140,8 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       const isReinit = state.results.length > 0;
 
       state.name = params.name;
+      state.mode = params.mode ?? "single_objective";
+      state.threshold = null;
 
       if (params.primary_metrics && params.primary_metrics.length > 0) {
         state.primaryMetrics = params.primary_metrics.map((m) => ({
@@ -982,6 +1168,83 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         ];
       }
 
+      if (state.mode === "frontier_exploration") {
+        if (state.primaryMetrics.length < 2 || state.primaryMetrics.length > 3) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ frontier_exploration requires 2-3 primary_metrics.",
+            }],
+            details: {},
+          };
+        }
+      }
+
+      if (state.mode === "threshold_then_optimize") {
+        if (state.primaryMetrics.length !== 2) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ threshold_then_optimize requires exactly 2 primary_metrics.",
+            }],
+            details: {},
+          };
+        }
+        if (!params.threshold_metric || !params.threshold_operator ||
+          params.threshold_value === undefined || !params.optimize_metric) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ threshold_then_optimize requires threshold_metric, threshold_operator, threshold_value, and optimize_metric.",
+            }],
+            details: {},
+          };
+        }
+        if (!state.primaryMetrics.find((m) => m.name === params.threshold_metric)) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ threshold_metric "${params.threshold_metric}" must be one of the primary_metrics.`,
+            }],
+            details: {},
+          };
+        }
+        if (!state.primaryMetrics.find((m) => m.name === params.optimize_metric)) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ optimize_metric "${params.optimize_metric}" must be one of the primary_metrics.`,
+            }],
+            details: {},
+          };
+        }
+        if (params.threshold_metric === params.optimize_metric) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ threshold_metric and optimize_metric must be different.",
+            }],
+            details: {},
+          };
+        }
+        state.threshold = {
+          metricName: params.threshold_metric,
+          operator: params.threshold_operator,
+          value: params.threshold_value,
+          optimizeMetric: params.optimize_metric,
+        };
+      }
+
+      if (state.mode === "single_objective" && state.primaryMetrics.length !== 1) {
+        return {
+          content: [{
+            type: "text",
+            text: "❌ single_objective mode requires exactly 1 primary metric.",
+          }],
+          details: {},
+        };
+      }
+
       // Reset results for new baseline segment
       state.results = [];
       state.bestMetric = null;
@@ -992,10 +1255,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         const jsonlPath = path.join(ctx.cwd, "autoresearch.jsonl");
         const config = JSON.stringify({
           type: "config",
-          name: state.name,
-          primaryMetrics: state.primaryMetrics,
-          // Legacy fields
-          metricName: state.metricName,
+              name: state.name,
+              mode: state.mode,
+              threshold: state.threshold,
+              primaryMetrics: state.primaryMetrics,
+              // Legacy fields
+              metricName: state.metricName,
           metricUnit: state.metricUnit,
           bestDirection: state.bestDirection,
         });
@@ -1026,8 +1291,14 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         : "";
 
       let metricInfo = "";
-      if (state.primaryMetrics.length > 1) {
+      if (state.mode === "frontier_exploration") {
         metricInfo = "Primary Metrics (Pareto Frontier):\n" + state.primaryMetrics.map(m => ` - ${m.name} (${m.unit || "unitless"}, ${m.direction} is better)`).join("\n");
+      } else if (state.mode === "threshold_then_optimize" && state.threshold) {
+        metricInfo =
+          "Primary Metrics (Threshold Then Optimize):\n" +
+          state.primaryMetrics.map(m => ` - ${m.name} (${m.unit || "unitless"}, ${m.direction} is better)`).join("\n") +
+          `\nThreshold: ${state.threshold.metricName} ${state.threshold.operator} ${formatNum(state.threshold.value, getMetricDef(state.primaryMetrics, state.threshold.metricName)?.unit ?? "")}` +
+          `\nOptimize after threshold: ${state.threshold.optimizeMetric}`;
       } else {
         metricInfo = `Metric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)`;
       }
@@ -1214,7 +1485,9 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       "Always call log_experiment after run_experiment to record the result.",
       "After run_experiment, always call log_experiment to record the result.",
       "log_experiment automatically runs git add -A && git commit with the description and a Result trailer. Do NOT commit manually before calling log_experiment.",
-      "Use status 'keep' if the PRIMARY metric improved. 'discard' if worse or unchanged. 'crash' if it failed. Secondary metrics are for monitoring — they almost never affect keep/discard. Only discard a primary improvement if a secondary metric degraded catastrophically, and explain why in the description.",
+      "Pass status 'crash' only for failed runs. For successful runs, provide the metrics and let log_experiment compute keep/discard from the experiment mode.",
+      "In frontier_exploration, a run is kept only if it is non-dominated by previous kept runs in the current segment.",
+      "In threshold_then_optimize, a run is kept only if it satisfies the threshold and improves the optimize_metric among feasible kept runs.",
       "If you discover complex but promising optimizations you won't pursue immediately, append them as bullet points to autoresearch.ideas.md. Don't let good ideas get lost.",
     ],
     parameters: LogParams,
@@ -1298,11 +1571,27 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         metric: primaryValues[state.metricName] ?? 0,
         primaryMetrics: primaryValues,
         metrics: secondaryMetrics,
-        status: params.status,
+        status: "discard",
         description: params.description,
         timestamp: Date.now(),
         segment: state.currentSegment,
       };
+
+      const existingResults = currentResults(state.results, state.currentSegment);
+      experiment.status = computeExperimentStatus(
+        state.mode,
+        existingResults,
+        state.primaryMetrics,
+        state.threshold,
+        {
+          ...experiment,
+          status: params.status,
+        }
+      );
+
+      if (params.status === "crash") {
+        experiment.status = "crash";
+      }
 
       state.results.push(experiment);
       experimentsThisSession++;
@@ -1350,8 +1639,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         primaryParts.push(part);
       }
       text += `\nPrimary: ${primaryParts.join("  ")}`;
-      if (state.primaryMetrics.length > 1 && params.status === "keep") {
+      if (state.mode === "frontier_exploration" && experiment.status === "keep") {
         text += isOnPareto ? " [ON PARETO FRONTIER]" : " [DOMINATED]";
+      } else if (state.mode === "threshold_then_optimize" && state.threshold) {
+        text += satisfiesThreshold(primaryValues, state.threshold)
+          ? " [THRESHOLD SATISFIED]"
+          : " [THRESHOLD FAILED]";
       }
 
       // Show secondary metrics
@@ -1381,12 +1674,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       text += `\n(${state.results.length} experiments total)`;
 
       // Auto-commit only on keep
-      if (params.status === "keep") {
+      if (experiment.status === "keep") {
         try {
           const resultData: Record<string, unknown> = {
-            status: params.status,
-            ...primaryValues,
-            ...secondaryMetrics,
+            status: experiment.status,
+            mode: state.mode,
+            primaryMetrics: primaryValues,
+            secondaryMetrics,
           };
           const trailerJson = JSON.stringify(resultData);
           const commitMsg = `${params.description}\n\nResult: ${trailerJson}`;
@@ -1434,7 +1728,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           }`;
         }
       } else {
-        text += `\n📝 Git: skipped commit (${params.status}) — revert with git checkout -- .`;
+        text += `\n📝 Git: skipped commit (${experiment.status}) — revert with git checkout -- .`;
       }
 
       // Persist to autoresearch.jsonl AFTER git commit (so commit hash is correct)
@@ -1503,7 +1797,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
       text += " " + theme.fg("muted", exp.description);
 
-      if (s.primaryMetrics.length > 1) {
+      if (s.mode === "frontier_exploration") {
         const cur = currentResults(s.results, s.currentSegment);
         const pareto = getParetoIndices(cur, s.primaryMetrics);
         const isOnFrontier = pareto.includes(cur.length - 1);
@@ -1512,6 +1806,18 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           theme.fg("warning", theme.bold(`Frontier: ${pareto.length} pts`));
         if (isOnFrontier && exp.status === "keep")
           text += theme.fg("success", " [NEW]");
+      } else if (s.mode === "threshold_then_optimize" && s.threshold) {
+        text +=
+          theme.fg("dim", " │ ") +
+          theme.fg(
+            "warning",
+            theme.bold(
+              `${s.threshold.metricName} ${s.threshold.operator} ${formatNum(
+                s.threshold.value,
+                getMetricDef(s.primaryMetrics, s.threshold.metricName)?.unit ?? ""
+              )}`
+            )
+          );
       } else if (s.bestMetric !== null) {
         text +=
           theme.fg("dim", " │ ") +
