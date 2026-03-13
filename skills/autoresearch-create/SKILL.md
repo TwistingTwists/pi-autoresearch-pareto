@@ -9,9 +9,9 @@ Autonomous experiment loop: try ideas, keep what works, discard what doesn't, ne
 
 ## Tools
 
-- **`init_experiment`** — configure session (name, metric, unit, direction). Call again to re-initialize with a new baseline when the optimization target changes.
+- **`init_experiment`** — configure session (name, metric, unit, direction). For multiple goals, use `primary_metrics` array. Call again to re-initialize with a new baseline when the optimization target changes.
 - **`run_experiment`** — runs command, times it, captures output.
-- **`log_experiment`** — records result. `keep` auto-commits. `discard`/`crash` → `git checkout -- .` to revert. Always include secondary `metrics` dict. Dashboard: ctrl+x.
+- **`log_experiment`** — records result. For multiple goals, use `primary_metrics` dict. `keep` auto-commits. `discard`/`crash` → `git checkout -- .` to revert. Always include secondary `metrics` dict. Dashboard: ctrl+x.
 
 ## Setup
 
@@ -63,6 +63,7 @@ Bash script (`set -euo pipefail`) that: pre-checks fast (syntax errors in <1s), 
 **LOOP FOREVER.** Never ask "should I continue?" — the user expects autonomous work.
 
 - **Primary metric is king.** Improved → `keep`. Worse/equal → `discard`. Secondary metrics rarely affect this.
+- **Pareto Frontier (Multi-objective):** If `primary_metrics` (2-3 recommended) are defined, `keep` if the result is non-dominated by any previous result in the current segment.
 - **Simpler is better.** Removing code for equal perf = keep. Ugly complexity for tiny gain = probably discard.
 - **Don't thrash.** Repeatedly reverting the same idea? Try something structurally different.
 - **Crashes:** fix if trivial, otherwise log and move on. Don't over-invest.
